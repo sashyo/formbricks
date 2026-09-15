@@ -64,9 +64,20 @@ async function sealWriteInput(data: any): Promise<any> {
   return data;
 }
 
+let openWarned = false;
 async function openRow(row: any): Promise<any> {
   if (!row || typeof row !== "object") return row;
-  for (const f of SEALED_FIELDS) if (isSealed(row[f])) row[f] = await openBag(row[f]);
+  for (const f of SEALED_FIELDS) {
+    if (!isSealed(row[f])) continue;
+    try {
+      row[f] = await openBag(row[f]);
+    } catch (e) {
+      // Best-effort: if the reader is not (yet) allowed to open — no PUBLIC decrypt policy, the
+      // response-reader role not granted, the sidecar down — leave the field sealed rather than crash
+      // the app. The value stays ciphertext, which is the safe failure.
+      if (!openWarned) { openWarned = true; console.warn("[minidauth-seal] leaving responses sealed:", (e as Error).message); }
+    }
+  }
   return row;
 }
 
