@@ -13,7 +13,7 @@
 //   node --import ./register.mjs server.mjs
 
 import { createServer } from "node:http";
-import { sealField, openValues, proxyConfig, proxyDecryptPolicy, proxyMintUserDoken, proxyVoucher } from "./seal.mjs";
+import { sealFields, openValues, proxyConfig, proxyDecryptPolicy, proxyMintUserDoken, proxyVoucher } from "./seal.mjs";
 import { verifyUserToken } from "./verify.mjs";
 
 const PORT = Number(process.env.PORT ?? 3020);
@@ -73,8 +73,10 @@ const server = createServer(async (req, res) => {
       // Returns marker-included values. A client-forged "ms1:" prefix does not skip sealing: sealField
       // seals anything that is not verifiable genuine ciphertext.
       const { fields } = await readBody(req);
+      const entries = Object.entries(fields || {});
+      const out = await sealFields(entries.map(([, v]) => String(v))); // ONE fan-out for all fields
       const sealed = {};
-      for (const [k, v] of Object.entries(fields || {})) sealed[k] = await sealField(String(v));
+      entries.forEach(([k], i) => { sealed[k] = out[i]; });
       return send(res, 200, { sealed });
     }
 

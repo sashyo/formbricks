@@ -113,20 +113,29 @@ export const MARKER = "ms1:"; // a sealed column is "ms1:<ciphertextB64>"
  *  the literal string it is. The caller must therefore only send NEW values here (plaintext writes),
  *  never re-feed a stored ciphertext, or it would be double-sealed. */
 export async function sealField(value) {
-  return MARKER + (await sealValue(value));
+  return (await sealFields([value]))[0];
 }
 
-/** Seal a string. Returns base64 ciphertext anyone can store but no one can read without a voucher. */
-export async function sealValue(plaintext) {
+/** Seal MANY strings in ONE cohort round trip: the signing flow takes an array and signs the whole
+ *  draft at once, so a page of fields (or a migration batch) costs a single fan-out, not one per
+ *  value. Returns marker-included values, order preserved. */
+export async function sealFields(plaintexts) {
+  if (!plaintexts || plaintexts.length === 0) return [];
   const t = await tide(), g = guestOf(t);
   const pae = new t.PolicyAuthorizedEncryptionFlow({ vendorId: t.cfg.vvkId, token: g.tok, sessionKey: g.k, voucherURL: "", keyInfo: t.keyInfo });
-  const { request, encReqs, timestamp } = await pae.createEncryptionRequest([{ data: new TextEncoder().encode(plaintext), tags: ["formbricks"] }]);
+  const { request, encReqs, timestamp } = await pae.createEncryptionRequest(
+    plaintexts.map((p) => ({ data: new TextEncoder().encode(String(p)), tags: ["formbricks"] })));
   request.addPolicy(t.enc);
   const sf = new t.dVVKSigningFlow(t.cfg.vvkId, t.keyInfo.UserPublic, t.keyInfo.OrkInfo.slice(), g.k, g.tok, "");
   sf.setVoucherRetrievalFunction(fnEncrypt);
-  const sigs = await sf.start(request);
-  const cipher = t.PPSF.create(encReqs[0].encryptedData, timestamp, encReqs[0].sizeLessThan32 ? null : encReqs[0].encryptionToSign, sigs[0]);
-  return Buffer.from(cipher).toString("base64");
+  const sigs = await sf.start(request); // ONE fan-out for the whole batch
+  return encReqs.map((e, i) =>
+    MARKER + Buffer.from(t.PPSF.create(e.encryptedData, timestamp, e.sizeLessThan32 ? null : e.encryptionToSign, sigs[i])).toString("base64"));
+}
+
+/** Seal a single string. Returns base64 ciphertext (no marker) - kept for callers that add their own. */
+export async function sealValue(plaintext) {
+  return (await sealFields([plaintext]))[0].slice(MARKER.length);
 }
 
 // Recover one plaintext from its ciphertext bytes and the cohort-returned key for it.
