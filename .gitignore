@@ -94,3 +94,7 @@ authzed/*.perf.jsonl
 docs/api-v3-reference/contract-tests/fixtures.json
 .schemathesis/
 __pycache__/
+
+# minidauth sidecar keys (never commit)
+integrations/minidauth/*.key
+integrations/minidauth/*.pub.b64

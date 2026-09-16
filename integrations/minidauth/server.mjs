@@ -1,21 +1,25 @@
-// A tiny sealing service for Formbricks.
+// A tiny sealing service for apps (Twenty, Cal, Formbricks).
 //
-// It holds no key. minidauth and the ORK cohort do the crypto; this only orchestrates it and injects
-// the reader identity on the open side, so Formbricks itself never holds a Tide credential, a role,
-// or anything that can read a sealed value. Formbricks calls /seal before a response reaches
-// Postgres and /open when an authorised reader needs it back.
+// It holds no key and, importantly, it holds no reading identity of its own. minidauth and the ORK
+// cohort do the crypto; this only orchestrates it. /open decrypts strictly on behalf of the end user
+// named in a verified IAM token: the caller must present that user's token, the sidecar verifies it,
+// and asks minidauth to voucher a decrypt for THAT user. minidauth's quorum-governed grant then
+// decides whether the user holds the reading role. There is no standing "reader" here to borrow, so
+// an unauthenticated caller who reaches /open gets nothing.
 //
 //   MINIDAUTH_URL=…  MINIDAUTH_TOKEN=…  MINIDAUTH_OPS_TOKEN=…  \
-//   MINIDAUTH_READER_UID=…  MINIDAUTH_READER_ROLE=response-reader \
+//   MINIDAUTH_READER_ROLE=crm-reader \                # capability the user must hold, NOT an identity
+//   MINIDAUTH_AUTH_MODE=hs256  MINIDAUTH_AUTH_SECRET=…  MINIDAUTH_AUTH_UID_CLAIM=sub \
 //   node --import ./register.mjs server.mjs
 
 import { createServer } from "node:http";
-import { sealValue, openValue } from "./seal.mjs";
+import { sealField, openValues, proxyConfig, proxyDecryptPolicy, proxyMintUserDoken, proxyVoucher } from "./seal.mjs";
+import { verifyUserToken } from "./verify.mjs";
 
 const PORT = Number(process.env.PORT ?? 3020);
-// Who reads, and the role a quorum has to have granted them. Revoke the role in minidauth and every
-// open below stops working, with no change to Formbricks. That is the whole point.
-const READER_UID = process.env.MINIDAUTH_READER_UID ?? "formbricks-reader";
+// The capability a quorum must have granted the user, keyed to the user's own uid (not a service
+// account). Revoke it for a user in minidauth and every open below stops working for them, with no
+// change to the app. That is the whole point.
 const READER_ROLE = process.env.MINIDAUTH_READER_ROLE ?? "response-reader";
 
 const readBody = (req) => new Promise((resolve, reject) => {
@@ -23,33 +27,92 @@ const readBody = (req) => new Promise((resolve, reject) => {
   req.on("end", () => { try { resolve(JSON.parse(b || "{}")); } catch (e) { reject(e); } });
   req.on("error", reject);
 });
-const send = (res, code, obj) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
+// CORS is open here for the Level 2b browser client demo. Lock it to the app's origin in a real
+// deployment; the relay endpoints below carry no app credential a browser could steal regardless.
+const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type, Authorization", "Access-Control-Allow-Methods": "POST, GET, OPTIONS" };
+const send = (res, code, obj) => { res.writeHead(code, { "Content-Type": "application/json", ...CORS }); res.end(JSON.stringify(obj)); };
+const sendRaw = (res, code, text) => { res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", ...CORS }); res.end(text); };
+
+// The end user's token: "Authorization: Bearer <token>", or a { userToken } body field for callers
+// that cannot set headers. Whichever is present, it is verified before it is trusted.
+const tokenFrom = (req, body) => {
+  const auth = req.headers["authorization"];
+  if (auth && /^Bearer\s+/i.test(auth)) return auth.replace(/^Bearer\s+/i, "").trim();
+  if (body && typeof body.userToken === "string") return body.userToken;
+  return null;
+};
 
 const server = createServer(async (req, res) => {
   try {
-    if (req.method === "GET" && req.url === "/health") return send(res, 200, { status: "up", reader: READER_UID, role: READER_ROLE });
+    if (req.method === "OPTIONS") { res.writeHead(204, CORS); return res.end(); }
+
+    if (req.method === "GET" && req.url === "/health")
+      return send(res, 200, { status: "up", role: READER_ROLE, authMode: process.env.MINIDAUTH_AUTH_MODE ?? "hs256", standingReader: false });
+
+    // ---- Level 2b relay: let a client that holds its own session key decrypt for itself ----
+    // The sidecar attaches its relying-party credential and forwards. It mints no identity and never
+    // sees plaintext: the decrypt runs in the client, the sidecar only relays vouchers and config.
+    if (req.method === "POST" && req.url === "/proxy/config")
+      return send(res, 200, await proxyConfig());
+    if (req.method === "POST" && req.url === "/proxy/decrypt-policy")
+      return send(res, 200, await proxyDecryptPolicy());
+    if (req.method === "POST" && req.url === "/proxy/user-token") {
+      const { userToken, sessionKey } = await readBody(req); // userToken proves who; sessionKey binds the doken
+      // Pin the doken to THIS sidecar's role, so a doken minted here can only ever read as READER_ROLE.
+      return send(res, 200, await proxyMintUserDoken(userToken, sessionKey, READER_ROLE));
+    }
+    if (req.method === "POST" && req.url === "/proxy/voucher") {
+      const b = await readBody(req); // { voucherRequest, doken, popTs, popNonce, popSig }
+      return sendRaw(res, 200, await proxyVoucher({ role: READER_ROLE, ...b }));
+    }
 
     if (req.method === "POST" && req.url === "/seal") {
       // { fields: { key: plaintextString } } -> { sealed: { key: ciphertextB64 } }
+      // Encryption is not the sensitive operation (anyone may write to the vault); the reading gate is
+      // on /open. Put /seal behind the same network boundary as the rest of the backend.
+      // Returns marker-included values. A client-forged "ms1:" prefix does not skip sealing: sealField
+      // seals anything that is not verifiable genuine ciphertext.
       const { fields } = await readBody(req);
       const sealed = {};
-      for (const [k, v] of Object.entries(fields || {})) sealed[k] = await sealValue(String(v));
+      for (const [k, v] of Object.entries(fields || {})) sealed[k] = await sealField(String(v));
       return send(res, 200, { sealed });
     }
 
     if (req.method === "POST" && req.url === "/open") {
-      // { fields: { key: ciphertextB64 } } -> { fields: { key: plaintextString } }, gated on the reader's role
-      const { fields } = await readBody(req);
+      // Server-side decryption from a bearer user token, NO session key and NO proof of possession.
+      // That is the weaker "the server can read" model, and it is a decryption oracle for anyone
+      // holding a user token. It is OFF by default: the client-side path (/proxy/voucher, gated on the
+      // browser's session key) is the only decryption path unless a deployment explicitly opts in.
+      if (!(process.env.MINIDAUTH_ALLOW_SERVER_OPEN === "true" || process.env.MINIDAUTH_ALLOW_SERVER_OPEN === "1")) {
+        return send(res, 403, { error: "server-side /open is disabled; decrypt via the client (session key + proof of possession)" });
+      }
+      // { fields: { key: ciphertextB64 } } -> { fields: { key: plaintextString } }
+      // Gated on the END USER's verified token: decrypt runs as that user, and only if minidauth's
+      // quorum grant says the user holds READER_ROLE.
+      const body = await readBody(req);
+      const token = tokenFrom(req, body);
+      if (!token) return send(res, 401, { error: "missing user token" });
+      let uid;
+      try {
+        ({ uid } = verifyUserToken(token));
+      } catch (e) {
+        return send(res, 401, { error: `invalid user token: ${e.message}` });
+      }
+      const entries = Object.entries(body.fields || {});
+      // Forward the user's own token so minidauth verifies the identity at its voucher boundary, not
+      // just here. When minidauth has user-token checking on, the uid it gates on comes from this token.
+      const plains = await openValues(uid, READER_ROLE, entries.map(([, v]) => String(v)), token); // ONE fan-out, as this user
       const out = {};
-      for (const [k, v] of Object.entries(fields || {})) out[k] = await openValue(READER_UID, READER_ROLE, String(v));
+      entries.forEach(([k], i) => { out[k] = plains[i]; });
       return send(res, 200, { fields: out });
     }
 
     send(res, 404, { error: "not found" });
   } catch (e) {
+    // minidauth refuses the voucher when the user does not hold the role -> 403, not 502.
     const refused = /does not hold|will not voucher|403/.test(String(e.message || e));
     send(res, refused ? 403 : 502, { error: String(e.message || e) });
   }
 });
 
-server.listen(PORT, () => console.log(`minidauth-seal on http://localhost:${PORT}  (reader ${READER_UID} needs ${READER_ROLE})`));
+server.listen(PORT, () => console.log(`minidauth-seal on http://localhost:${PORT}  (decrypts only as a verified user who holds ${READER_ROLE}; no standing reader)`));
