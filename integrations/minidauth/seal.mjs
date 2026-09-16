@@ -105,73 +105,35 @@ const fnDecrypt = (uid, role, userToken) => (req) => mc("/vault/voucher", {
 
 export const MARKER = "ms1:"; // a sealed column is "ms1:<ciphertextB64>"
 
-/** Is this value ALREADY a genuine sealed envelope, as opposed to plaintext or a forged "ms1:" string?
- *  A real seal is a versioned PolicyProtectedSerializedField (v2) carrying a cohort VVK signature and
- *  an 8-byte timestamp; a client "ms1:<plaintext>" string does not deserialize as one. We use this to
- *  make sealing IDEMPOTENT: a stored ciphertext fed back in (e.g. an unchanged field on an update, or a
- *  client that echoes what it read) is passed through unchanged instead of double-sealed, which would
- *  otherwise corrupt the value so it can never be revealed.
+/** Seal one field value. There is NO passthrough: a value that merely looks sealed is sealed anyway.
+ *  Only the cohort can tell a genuine seal (a VVK-signed envelope) from a forged one (an envelope
+ *  shaped to look right but full of plaintext), because only the cohort can verify the VVK signature.
+ *  So the sidecar cannot safely trust the shape offline: it treats every inbound value as plaintext
+ *  and seals it, marker included. This guarantees the invariant - a sealed column only ever holds a
+ *  cohort-signed envelope, never plaintext a client dressed up as one.
  *
- *  This is a STRUCTURAL check, not a signature verification: only the cohort can verify the VVK
- *  signature, and it does, on read. Its job is to stop accidental double-sealing and casual prefix
- *  forgery, not to authenticate the envelope. A value that is not a genuine envelope - including a
- *  forged "ms1:" prefix on plaintext - fails this test and is sealed, so plaintext never lands in a
- *  sealed column by echoing the marker. */
-function isGenuineSealedEnvelope(t, value) {
-  if (typeof value !== "string" || !value.startsWith(MARKER)) return false;
-  let bytes;
-  try {
-    bytes = Uint8Array.from(Buffer.from(value.slice(MARKER.length), "base64"));
-  } catch {
-    return false;
-  }
-  if (bytes.length < 40) return false; // a real envelope carries a 64-byte signature + timestamp + data
-  try {
-    const b = t.PPSF.deserialize(bytes); // throws on a version/shape mismatch, i.e. on non-envelopes
-    return Boolean(
-      b && b.signature && b.signature.length > 0 &&
-      b.timestamp && b.timestamp.length === 8 &&
-      b.encFieldChk && b.encFieldChk.length > 0,
-    );
-  } catch {
-    return false;
-  }
-}
-
-/** Seal one field value. Plaintext is sealed; a value that is already a genuine sealed envelope is
- *  returned unchanged (idempotent). A forged "ms1:" prefix on plaintext is NOT genuine and is sealed. */
+ *  The caller must therefore send NEW values here (plaintext writes) and never re-feed a stored
+ *  ciphertext, or it would be double-sealed. In Twenty this holds: the browser decrypts sealed fields
+ *  into the Apollo response, so edits are saved as plaintext, never as the ciphertext that was read. */
 export async function sealField(value) {
   return (await sealFields([value]))[0];
 }
 
 /** Seal MANY strings in ONE cohort round trip: the signing flow takes an array and signs the whole
  *  draft at once, so a page of fields (or a migration batch) costs a single fan-out, not one per
- *  value. Values that are already genuine sealed envelopes are passed through unchanged, so re-feeding
- *  a stored ciphertext does not double-seal it. Returns marker-included values, order preserved. */
+ *  value. Returns marker-included values, order preserved. No passthrough (see sealField). */
 export async function sealFields(plaintexts) {
   if (!plaintexts || plaintexts.length === 0) return [];
   const t = await tide(), g = guestOf(t);
-  // Partition: genuine ciphertext passes through unchanged; everything else (plaintext, forged prefix)
-  // is sealed. Only the to-seal subset costs a cohort fan-out.
-  const out = new Array(plaintexts.length);
-  const toSeal = []; // { i, value } preserving original positions
-  plaintexts.forEach((p, i) => {
-    if (isGenuineSealedEnvelope(t, p)) out[i] = String(p);
-    else toSeal.push({ i, value: String(p) });
-  });
-  if (toSeal.length === 0) return out;
   const pae = new t.PolicyAuthorizedEncryptionFlow({ vendorId: t.cfg.vvkId, token: g.tok, sessionKey: g.k, voucherURL: "", keyInfo: t.keyInfo });
   const { request, encReqs, timestamp } = await pae.createEncryptionRequest(
-    toSeal.map((s) => ({ data: new TextEncoder().encode(s.value), tags: ["formbricks"] })));
+    plaintexts.map((p) => ({ data: new TextEncoder().encode(String(p)), tags: ["formbricks"] })));
   request.addPolicy(t.enc);
   const sf = new t.dVVKSigningFlow(t.cfg.vvkId, t.keyInfo.UserPublic, t.keyInfo.OrkInfo.slice(), g.k, g.tok, "");
   sf.setVoucherRetrievalFunction(fnEncrypt);
   const sigs = await sf.start(request); // ONE fan-out for the whole batch
-  encReqs.forEach((e, j) => {
-    out[toSeal[j].i] =
-      MARKER + Buffer.from(t.PPSF.create(e.encryptedData, timestamp, e.sizeLessThan32 ? null : e.encryptionToSign, sigs[j])).toString("base64");
-  });
-  return out;
+  return encReqs.map((e, i) =>
+    MARKER + Buffer.from(t.PPSF.create(e.encryptedData, timestamp, e.sizeLessThan32 ? null : e.encryptionToSign, sigs[i])).toString("base64"));
 }
 
 /** Seal a single string. Returns base64 ciphertext (no marker) - kept for callers that add their own. */
