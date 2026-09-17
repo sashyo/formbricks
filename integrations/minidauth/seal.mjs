@@ -184,6 +184,11 @@ export const proxyConfig = () => mcJson("/tide/enclave/config", { headers: appAu
 export const proxyDecryptPolicy = () => mcJson("/vault/decrypt-policy", { headers: appAuth() });
 export const proxyMintUserDoken = (userToken, sessionKey, role) =>
   mcJson("/vault/user-token", { method: "POST", headers: appAuth(), body: JSON.stringify({ userToken, sessionKey, role }) });
+// Revoke an app session at logout: the app posts the session id its reader tokens carry, and minidauth
+// stops minting dokens for it and refuses vouchers whose doken carries it. The sidecar attaches its
+// relying-party credential; the sid is server-derived by the app, never chosen by a browser.
+export const proxyRevoke = (sid) =>
+  mcJson("/vault/revoke", { method: "POST", headers: appAuth(), body: JSON.stringify({ sid }) });
 export const proxyVoucher = ({ role, voucherRequest, doken, popTs, popNonce, popSig }) =>
   mc("/vault/voucher", {
     method: "POST",

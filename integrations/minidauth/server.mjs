@@ -13,7 +13,7 @@
 //   node --import ./register.mjs server.mjs
 
 import { createServer } from "node:http";
-import { sealFields, openValues, proxyConfig, proxyDecryptPolicy, proxyMintUserDoken, proxyVoucher } from "./seal.mjs";
+import { sealFields, openValues, proxyConfig, proxyDecryptPolicy, proxyMintUserDoken, proxyVoucher, proxyRevoke } from "./seal.mjs";
 import { verifyUserToken } from "./verify.mjs";
 
 const PORT = Number(process.env.PORT ?? 3020);
@@ -64,6 +64,10 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/proxy/voucher") {
       const b = await readBody(req); // { voucherRequest, doken, popTs, popNonce, popSig }
       return sendRaw(res, 200, await proxyVoucher({ role: READER_ROLE, ...b }));
+    }
+    if (req.method === "POST" && req.url === "/proxy/revoke") {
+      const { sid } = await readBody(req); // the app's server-derived session id, revoked at logout
+      return send(res, 200, await proxyRevoke(sid));
     }
 
     if (req.method === "POST" && req.url === "/seal") {
