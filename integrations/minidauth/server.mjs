@@ -13,7 +13,7 @@
 //   node --import ./register.mjs server.mjs
 
 import { createServer } from "node:http";
-import { sealFields, openValues, proxyConfig, proxyDecryptPolicy, proxyMintUserDoken, proxyVoucher, proxyRevoke } from "./seal.mjs";
+import { sealFields, openValues, signPayload, verifyCohortSignature, proxyConfig, proxyDecryptPolicy, proxyMintUserDoken, proxyVoucher, proxyRevoke } from "./seal.mjs";
 import { verifyUserToken } from "./verify.mjs";
 
 const PORT = Number(process.env.PORT ?? 3020);
@@ -122,6 +122,31 @@ const server = createServer(async (req, res) => {
       const out = {};
       entries.forEach(([k], i) => { out[k] = plains[i]; });
       return send(res, 200, { fields: out });
+    }
+
+    if (req.method === "POST" && req.url === "/sign") {
+      // Have the ORK cohort threshold-sign a payload on behalf of the verified end user, iff minidauth's
+      // quorum grant says that user holds READER_ROLE. The signature is an ordinary VVK signature anyone
+      // can verify with the vendor public key - no key is assembled here, so this is not a signing oracle
+      // an unauthenticated caller can borrow: without a valid user token there is no signer.
+      const body = await readBody(req);
+      const token = tokenFrom(req, body);
+      if (!token) return send(res, 401, { error: "missing user token" });
+      let uid;
+      try { ({ uid } = verifyUserToken(token)); }
+      catch (e) { return send(res, 401, { error: `invalid user token: ${e.message}` }); }
+      const payload = typeof body.payload === "string" ? body.payload : null;
+      if (!payload) return send(res, 400, { error: "payload (a string) is required" });
+      const signature = await signPayload(uid, READER_ROLE, payload, token); // gated by the grant, cohort-signed
+      return send(res, 200, { signature });
+    }
+
+    if (req.method === "POST" && req.url === "/verify") {
+      // Public: check a cohort signature over a payload against the vendor public key. No identity, no
+      // secret - the whole point is that anyone can verify, so this endpoint carries no auth.
+      const { payload, signature } = await readBody(req);
+      if (typeof payload !== "string") return send(res, 400, { error: "payload (a string) is required" });
+      return send(res, 200, await verifyCohortSignature(payload, signature));
     }
 
     send(res, 404, { error: "not found" });

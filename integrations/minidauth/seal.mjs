@@ -6,7 +6,7 @@
 // never here: it lives as shares across the ORK network and is never assembled, so this process
 // holds nothing that can read a sealed value on its own.
 
-import { webcrypto, createPrivateKey, sign as edSign, randomUUID } from "node:crypto";
+import { webcrypto, createPrivateKey, createPublicKey, sign as edSign, verify as edVerify, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 // tide-js expects a browser: give it crypto on window and globalThis.
@@ -165,6 +165,75 @@ export async function openValues(uid, role, cipherB64s, userToken) {
   df.setVoucherRetrievalFunction(fnDecrypt(uid, role, userToken));
   const keys = await df.start(request); // ONE fan-out, one partial-share set per ciphertext
   return Promise.all(ciphers.map((c, i) => decryptWith(t, c, keys[i])));
+}
+
+// ---- cohort SIGNING (custom-signing / BasicCustom policy) ------------------------------------
+//
+// The other half of the vault: rather than encrypting, ask the ORK cohort to SIGN a payload, gated
+// on the caller's quorum-granted role. minidauth's /vault/sign checks the user's committed grant
+// holds the role and, if so, has the cohort threshold-sign the exact bytes. What comes back is an
+// ordinary VVK signature: 64 bytes of Ed25519 anyone can verify with the vendor public key, over the
+// payload alone - no key was ever assembled, so no operator (or stolen DB) can forge one.
+//
+// Signing may live on a different vendor key from sealing (a VVK carrying a custom-signing policy):
+// point MINIDAUTH_SIGN_URL at that minidauth. It defaults to MINIDAUTH_URL when the same key does both.
+const SIGN_MC = (process.env.MINIDAUTH_SIGN_URL ?? MC).replace(/\/+$/, "");
+async function signMc(path, opts) {
+  const r = await fetch(SIGN_MC + path, opts);
+  const text = await r.text();
+  if (!r.ok) throw new Error(`${path} -> ${r.status} ${text}`);
+  return text;
+}
+
+/** Have the cohort threshold-sign `payload` as `uid`, iff minidauth's grant says uid holds `role`.
+ *  userToken (the end user's verified token) is forwarded as X-Tide-User so minidauth derives the
+ *  signer from it. Returns the signature, base64. */
+export async function signPayload(uid, role, payload, userToken) {
+  const body = JSON.stringify({ uid, role, payload: String(payload) });
+  const out = JSON.parse(await signMc("/vault/sign", {
+    method: "POST",
+    headers: { ...appAuth(), ...(userToken ? { "X-Tide-User": userToken } : {}) },
+    body,
+  }));
+  return out.signature;
+}
+
+// The signing VVK's public key (32 bytes hex from minidauth), wrapped as Ed25519 SPKI for node.
+let _vendorKey;
+async function vendorPublicKey() {
+  if (_vendorKey) return _vendorKey;
+  const cfg = JSON.parse(await signMc("/tide/enclave/config", { headers: appAuth() }));
+  const hex = cfg.gVVK;
+  if (!/^[0-9a-f]{64}$/i.test(hex ?? "")) throw new Error("minidauth returned no vendor key");
+  _vendorKey = createPublicKey({
+    key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(hex, "hex")]),
+    format: "der", type: "spki",
+  });
+  return _vendorKey;
+}
+
+// The cohort signs the request's draft: a TideMemory over the payload - LE version 1, LE length, bytes.
+// A verifier rebuilds exactly this, so the signature checks against the payload alone.
+function draftOf(text) {
+  const body = Buffer.from(String(text), "utf8");
+  const head = Buffer.alloc(8);
+  head.writeInt32LE(1, 0);
+  head.writeInt32LE(body.length, 4);
+  return Buffer.concat([head, body]);
+}
+
+/** Verify a cohort signature over `payload` against the signing VVK's public key. Pure Ed25519, no
+ *  network identity: anyone with the vendor public key can run this (this app, an auditor, a court). */
+export async function verifyCohortSignature(payload, signatureB64) {
+  if (!signatureB64) return { valid: false, reason: "no signature" };
+  const sig = Buffer.from(signatureB64, "base64");
+  if (sig.length !== 64) return { valid: false, reason: "not an Ed25519 signature" };
+  try {
+    const ok = edVerify(null, draftOf(payload), await vendorPublicKey(), sig);
+    return ok ? { valid: true } : { valid: false, reason: "the cohort did not sign this payload" };
+  } catch (e) {
+    return { valid: false, reason: e.message };
+  }
 }
 
 /** Open a single sealed string, but only if uid holds role. Throws when minidauth refuses the voucher. */
