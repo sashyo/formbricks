@@ -1,3 +1,17 @@
+<!-- minidauth:start -->
+> ## 🔒 This build is minidauth'd
+>
+> **Formbricks, with a key nobody holds.** What people actually tell you, every survey response and contact attribute is sealed before it ever reaches the database, encrypted with a key that is never assembled anywhere, not even to decrypt. The key lives as threshold shares across the [Tide](https://tide.org) network, so the classic breach, someone walking off with your database or a backup, turns up nothing readable.
+>
+> - **Your database holds only ciphertext.** A stolen dump or a leaked backup is useless to whoever takes it.
+> - **There is no standing key to steal.** The vendor key is never whole, not in this app and not on any single server.
+> - **Reads are governed, not assumed.** A quorum grants the reading role. Revoke it and reads stop everywhere, at once.
+> - **Nobody juggles keys.** People keep the login they already have. The gate is a role, not a keyfile they can lose.
+> - **Nothing else changes.** Formbricks works exactly as it does upstream, and sealing stays off until you turn it on.
+>
+> See how it works → **[minidauth](https://github.com/sashyo/minidauth)** · **[dauth.me](https://www.dauth.me)**
+<!-- minidauth:end -->
+
 <div id="top"></div>
 
 <p align="center">Help us grow and star us on Github! ⭐️</p>
@@ -9,6 +23,11 @@
 <img width="120" alt="Open Source Privacy First Experience Management Solution Qualtrics Alternative Logo" src="https://github.com/formbricks/formbricks/assets/72809645/0086704f-bee7-4d38-9cc8-fa42ee59e004">
 
 </a>
+
+<!-- minidauth-badge -->
+<p align="center">
+  <a href="https://github.com/sashyo/minidauth"><img alt="minidauth'd" src="https://img.shields.io/badge/minidauth%27d-sealed_at_rest-2ea44f?style=for-the-badge&logo=lock&logoColor=white"></a>
+</p>
 
 <h3 align="center">Formbricks</h3>
 
