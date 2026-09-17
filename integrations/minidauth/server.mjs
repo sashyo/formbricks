@@ -66,6 +66,17 @@ const server = createServer(async (req, res) => {
       return sendRaw(res, 200, await proxyVoucher({ role: READER_ROLE, ...b }));
     }
     if (req.method === "POST" && req.url === "/proxy/revoke") {
+      // Revocation is a SERVER-only operation: only the app (at logout) may revoke a session, never a
+      // browser. A browser could otherwise post any session id it holds a token for and cut off that
+      // session's decryption (a denial of service). If MINIDAUTH_REVOKE_SECRET is set, require it; and
+      // in any case refuse a request that carries an Origin header (i.e. one made from a browser), since
+      // the server-to-server call from the app carries none.
+      const secret = process.env.MINIDAUTH_REVOKE_SECRET;
+      const provided = req.headers["x-minidauth-revoke-secret"];
+      const fromBrowser = Boolean(req.headers["origin"]);
+      if (secret ? provided !== secret : fromBrowser) {
+        return send(res, 401, { error: "session revocation is a server-only operation" });
+      }
       const { sid } = await readBody(req); // the app's server-derived session id, revoked at logout
       return send(res, 200, await proxyRevoke(sid));
     }
