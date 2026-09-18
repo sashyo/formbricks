@@ -29,6 +29,24 @@
   <a href="https://github.com/sashyo/minidauth"><img alt="minidauth'd" src="https://img.shields.io/badge/minidauth%27d-sealed_at_rest-2ea44f?style=for-the-badge&logo=lock&logoColor=white"></a>
 </p>
 
+<!-- minidauth-run:start -->
+### Running it with minidauth
+
+Sealing is off until you set `MINIDAUTH_SEAL_URL`; unconfigured, Formbricks behaves exactly like upstream.
+
+Formbricks seals survey answers (`Response.data`) and contact attributes (`Response.contactAttributes`) as whole-JSON bags. Unlike the other integrations, it uses the single-reader model: the sidecar itself holds one `response-reader` role and opens server-side, rather than opening per signed-in user.
+
+1. **Bring up minidauth** with the turnkey compose (see minidauth's [docs/sealing.md](https://github.com/sashyo/minidauth/blob/main/docs/sealing.md)), and run the sealing sidecar with `MINIDAUTH_READER_ROLE=response-reader` and a reader id the quorum granted that role. The step-by-step, including the sidecar's reader configuration, is in [integrations/minidauth/README.md](integrations/minidauth/README.md).
+
+2. **Point Formbricks at it:**
+
+   ```sh
+   MINIDAUTH_SEAL_URL=http://localhost:3021
+   ```
+
+Revoke the one `response-reader` grant in minidauth and every answer goes dark at once, with no change to Formbricks.
+<!-- minidauth-run:end -->
+
 <h3 align="center">Formbricks</h3>
 
 <p align="center">
